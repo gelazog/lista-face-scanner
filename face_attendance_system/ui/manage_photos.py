@@ -5,6 +5,7 @@ Pestaña D de la ventana principal.
 """
 
 import os
+import re
 import shutil
 import threading
 import logging
@@ -13,7 +14,7 @@ from tkinter import ttk, filedialog, messagebox
 import tkinter as tk
 from PIL import Image, ImageTk
 
-from database import obtener_todos_los_usuarios
+from database import obtener_todos_los_usuarios, actualizar_usuario
 from face_engine import MotorReconocimiento, USERS_DIR
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,9 @@ THUMB_H          = 88
 THUMB_PAD        = 8
 FOTOS_MINIMAS    = 3
 EXTENSIONES      = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+
+# ─── Regex validación de nombre ───────────────────────────────────────────────
+_RE_NOMBRE = re.compile(r"^[a-zA-ZáéíóúÁÉÍÓÚñÑüÜ\s]+$")
 
 
 class GestionarFotos(ttk.Frame):
@@ -52,6 +56,12 @@ class GestionarFotos(ttk.Frame):
         self._fotos_sel: set[int]       = set()  # índices seleccionados
         self._thumb_refs: list          = []      # evita GC en ImageTk
         self._check_vars: list          = []      # tk.BooleanVar por miniatura
+
+        # StringVars para el formulario de edición
+        self._var_nombre   = tk.StringVar()
+        self._var_apellido = tk.StringVar()
+        self._nombre_orig  = ""
+        self._apellido_orig = ""
 
         self.configure(style="Panel.TFrame")
         self._construir_ui()
@@ -239,6 +249,92 @@ class GestionarFotos(ttk.Frame):
 
         self._mostrar_placeholder("Seleccione un usuario\npara ver sus fotos.")
 
+        # ── Sección de edición de datos del usuario ───────────────────────────
+        self._construir_seccion_edicion()
+
+    def _construir_seccion_edicion(self):
+        """Construye el panel de edición de nombre/apellido debajo del canvas."""
+        self._marco_edicion = tk.Frame(
+            self._marco_fotos, bg=FONDO_PANEL,
+            padx=0, pady=0,
+        )
+        self._marco_edicion.grid(row=2, column=0, sticky="ew", padx=4, pady=(0, 4))
+        self._marco_edicion.columnconfigure(0, weight=1)
+
+        # Encabezado de la sección
+        cab_edicion = tk.Frame(self._marco_edicion, bg=PANEL_SECUNDARIO, padx=12, pady=6)
+        cab_edicion.grid(row=0, column=0, sticky="ew")
+
+        tk.Label(
+            cab_edicion,
+            text="✏  Editar información del alumno",
+            bg=PANEL_SECUNDARIO, fg=ACENTO,
+            font=("Segoe UI", 10, "bold"),
+        ).pack(side="left")
+
+        # Cuerpo del formulario
+        cuerpo = tk.Frame(self._marco_edicion, bg=FONDO_PANEL, padx=12, pady=10)
+        cuerpo.grid(row=1, column=0, sticky="ew")
+        cuerpo.columnconfigure(1, weight=1)
+        cuerpo.columnconfigure(3, weight=1)
+
+        # Etiqueta + entrada Nombre
+        tk.Label(
+            cuerpo, text="Nombre:",
+            bg=FONDO_PANEL, fg=TEXTO_CLARO,
+            font=("Segoe UI", 10),
+        ).grid(row=0, column=0, sticky="w", padx=(0, 6))
+
+        self._entry_nombre = tk.Entry(
+            cuerpo,
+            textvariable=self._var_nombre,
+            bg=PANEL_SECUNDARIO, fg=TEXTO_CLARO,
+            insertbackground=ACENTO,
+            relief="flat",
+            font=("Segoe UI", 10),
+            state="disabled",
+        )
+        self._entry_nombre.grid(row=0, column=1, sticky="ew", padx=(0, 18), ipady=4)
+
+        # Etiqueta + entrada Apellido
+        tk.Label(
+            cuerpo, text="Apellido:",
+            bg=FONDO_PANEL, fg=TEXTO_CLARO,
+            font=("Segoe UI", 10),
+        ).grid(row=0, column=2, sticky="w", padx=(0, 6))
+
+        self._entry_apellido = tk.Entry(
+            cuerpo,
+            textvariable=self._var_apellido,
+            bg=PANEL_SECUNDARIO, fg=TEXTO_CLARO,
+            insertbackground=ACENTO,
+            relief="flat",
+            font=("Segoe UI", 10),
+            state="disabled",
+        )
+        self._entry_apellido.grid(row=0, column=3, sticky="ew", ipady=4)
+
+        # Fila con el botón de guardar
+        fila_btn = tk.Frame(self._marco_edicion, bg=FONDO_PANEL, padx=12, pady=(0, 10))
+        fila_btn.grid(row=2, column=0, sticky="w")
+
+        self._btn_guardar = tk.Button(
+            fila_btn,
+            text="Guardar cambios",
+            bg=PANEL_SECUNDARIO, fg=TEXTO_OPACO,
+            font=("Segoe UI", 9, "bold"),
+            relief="flat", padx=14, pady=5,
+            cursor="hand2",
+            state="disabled",
+            command=self._guardar_cambios_usuario,
+            activebackground=PANEL_SECUNDARIO, activeforeground=TEXTO_OPACO,
+        )
+        self._btn_guardar.pack(side="left")
+
+        # Registrar trazas para habilitar/deshabilitar el botón
+        self._var_nombre.trace_add("write", self._on_campo_editado)
+        self._var_apellido.trace_add("write", self._on_campo_editado)
+
     # ═════════════════════════════════════════════════════════════════════════
     # Carga de datos
     # ═════════════════════════════════════════════════════════════════════════
@@ -285,6 +381,182 @@ class GestionarFotos(ttk.Frame):
         self._btn_subir.configure(state="normal")
 
         self._recargar_miniaturas()
+        self._poblar_campos_edicion(nombre, apellido)
+
+    def _poblar_campos_edicion(self, nombre: str, apellido: str):
+        """Rellena los campos de edición con los datos actuales del usuario."""
+        self._nombre_orig  = nombre
+        self._apellido_orig = apellido
+
+        # Desactivar trazas temporalmente para evitar activar el botón
+        self._var_nombre.set(nombre)
+        self._var_apellido.set(apellido)
+
+        self._entry_nombre.configure(state="normal")
+        self._entry_apellido.configure(state="normal")
+
+        # El botón siempre empieza desactivado al seleccionar un usuario
+        self._btn_guardar.configure(
+            state="disabled",
+            bg=PANEL_SECUNDARIO, fg=TEXTO_OPACO,
+            activebackground=PANEL_SECUNDARIO, activeforeground=TEXTO_OPACO,
+        )
+
+    def _on_campo_editado(self, *_args):
+        """Habilita o deshabilita el botón Guardar según cambios en los campos."""
+        nombre_actual   = self._var_nombre.get()
+        apellido_actual = self._var_apellido.get()
+
+        hay_cambio = (
+            nombre_actual != self._nombre_orig
+            or apellido_actual != self._apellido_orig
+        )
+
+        if hay_cambio and self._usuario_sel is not None:
+            self._btn_guardar.configure(
+                state="normal",
+                bg=ACENTO, fg="#0A0A1A",
+                activebackground="#00B894", activeforeground="#0A0A1A",
+            )
+        else:
+            self._btn_guardar.configure(
+                state="disabled",
+                bg=PANEL_SECUNDARIO, fg=TEXTO_OPACO,
+                activebackground=PANEL_SECUNDARIO, activeforeground=TEXTO_OPACO,
+            )
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # Guardar cambios de usuario
+    # ═════════════════════════════════════════════════════════════════════════
+
+    def _guardar_cambios_usuario(self):
+        """Valida, guarda en DB, renombra carpeta y actualiza la UI."""
+        if not self._usuario_sel:
+            return
+
+        nuevo_nombre   = self._var_nombre.get().strip()
+        nuevo_apellido = self._var_apellido.get().strip()
+
+        # ── Validación ────────────────────────────────────────────────────────
+        if not nuevo_nombre:
+            messagebox.showwarning("Datos incompletos", "El campo Nombre no puede estar vacío.")
+            return
+        if not nuevo_apellido:
+            messagebox.showwarning("Datos incompletos", "El campo Apellido no puede estar vacío.")
+            return
+        if not _RE_NOMBRE.match(nuevo_nombre):
+            messagebox.showwarning(
+                "Nombre inválido",
+                "El Nombre solo puede contener letras y espacios (incluye tildes y ñ).",
+            )
+            return
+        if not _RE_NOMBRE.match(nuevo_apellido):
+            messagebox.showwarning(
+                "Apellido inválido",
+                "El Apellido solo puede contener letras y espacios (incluye tildes y ñ).",
+            )
+            return
+
+        usuario_id     = self._usuario_sel["id"]
+        nombre_orig    = self._nombre_orig
+        apellido_orig  = self._apellido_orig
+
+        # ── Actualizar en la DB ───────────────────────────────────────────────
+        ok = actualizar_usuario(usuario_id, nuevo_nombre, nuevo_apellido)
+        if not ok:
+            messagebox.showerror(
+                "Error en base de datos",
+                "No se pudo actualizar el nombre en la base de datos.",
+            )
+            return
+
+        # ── Renombrar carpeta si cambia el nombre ──────────────────────────────
+        ruta_vieja = self._ruta_usuario
+        nueva_carpeta = f"{nuevo_nombre}_{nuevo_apellido}"
+        ruta_nueva = os.path.join(USERS_DIR, nueva_carpeta)
+
+        carpeta_renombrada = False
+        if os.path.isdir(ruta_vieja) and ruta_vieja != ruta_nueva:
+            if os.path.exists(ruta_nueva):
+                # Revertir el cambio en la DB
+                actualizar_usuario(usuario_id, nombre_orig, apellido_orig)
+                messagebox.showerror(
+                    "Carpeta ya existe",
+                    f"Ya existe una carpeta con el nombre '{nueva_carpeta}'.\n"
+                    "No se realizaron cambios.",
+                )
+                # Restaurar los campos al valor original
+                self._poblar_campos_edicion(nombre_orig, apellido_orig)
+                return
+            try:
+                os.rename(ruta_vieja, ruta_nueva)
+                carpeta_renombrada = True
+            except PermissionError as exc:
+                # Revertir el cambio en la DB
+                actualizar_usuario(usuario_id, nombre_orig, apellido_orig)
+                messagebox.showerror(
+                    "Error al renombrar carpeta",
+                    f"No se pudo renombrar la carpeta:\n{exc}\n\nNo se realizaron cambios.",
+                )
+                self._poblar_campos_edicion(nombre_orig, apellido_orig)
+                return
+            except OSError as exc:
+                # Revertir el cambio en la DB
+                actualizar_usuario(usuario_id, nombre_orig, apellido_orig)
+                messagebox.showerror(
+                    "Error al renombrar carpeta",
+                    f"No se pudo renombrar la carpeta:\n{exc}\n\nNo se realizaron cambios.",
+                )
+                self._poblar_campos_edicion(nombre_orig, apellido_orig)
+                return
+
+        # ── Actualizar estado interno ─────────────────────────────────────────
+        self._usuario_sel["nombre"]   = nuevo_nombre
+        self._usuario_sel["apellido"] = nuevo_apellido
+
+        if carpeta_renombrada:
+            self._ruta_usuario = ruta_nueva
+            self._usuario_sel["ruta_carpeta"] = ruta_nueva
+
+        # Actualizar la lista en memoria
+        for u in self._usuarios:
+            if u["id"] == usuario_id:
+                u["nombre"]   = nuevo_nombre
+                u["apellido"] = nuevo_apellido
+                if carpeta_renombrada:
+                    u["ruta_carpeta"] = ruta_nueva
+                break
+
+        # Actualizar los valores "originales" para el botón
+        self._nombre_orig   = nuevo_nombre
+        self._apellido_orig = nuevo_apellido
+
+        # Actualizar el listbox conservando la selección actual
+        sel = self._listbox.curselection()
+        sel_idx = sel[0] if sel else None
+        self._listbox.delete(0, "end")
+        for u in self._usuarios:
+            self._listbox.insert("end", f"  {u['nombre']} {u['apellido']}")
+        if sel_idx is not None:
+            self._listbox.selection_set(sel_idx)
+            self._listbox.see(sel_idx)
+
+        # Actualizar etiqueta del panel derecho
+        self._lbl_usuario.configure(
+            text=f"Fotos de:  {nuevo_nombre} {nuevo_apellido}", fg=TEXTO_CLARO
+        )
+
+        # Deshabilitar el botón guardar (ya no hay cambios pendientes)
+        self._btn_guardar.configure(
+            state="disabled",
+            bg=PANEL_SECUNDARIO, fg=TEXTO_OPACO,
+            activebackground=PANEL_SECUNDARIO, activeforeground=TEXTO_OPACO,
+        )
+
+        # Invalidar caché de reconocimiento facial
+        self._recargar_motor_bg()
+
+        messagebox.showinfo("Datos actualizados", "Datos actualizados correctamente.")
 
     # ═════════════════════════════════════════════════════════════════════════
     # Miniaturas

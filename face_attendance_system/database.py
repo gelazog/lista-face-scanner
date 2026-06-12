@@ -206,6 +206,57 @@ def obtener_resumen_asistencia(fecha_inicio: str, fecha_fin: str) -> list[dict]:
         return resultado
 
 
+def actualizar_asistencia(registro_id: int, nuevo_usuario_id: int) -> bool:
+    """Corrige el usuario de un registro de asistencia existente."""
+    with _conexion() as conn:
+        cur = conn.execute(
+            "UPDATE asistencia SET usuario_id=? WHERE id=?",
+            (nuevo_usuario_id, registro_id)
+        )
+        return cur.rowcount > 0
+
+
+def eliminar_asistencia(registro_id: int) -> bool:
+    """Elimina un registro de asistencia."""
+    with _conexion() as conn:
+        cur = conn.execute("DELETE FROM asistencia WHERE id=?", (registro_id,))
+        return cur.rowcount > 0
+
+
+def actualizar_usuario(usuario_id: int, nombre: str, apellido: str) -> bool:
+    """Actualiza el nombre y apellido de un usuario."""
+    with _conexion() as conn:
+        cur = conn.execute(
+            "UPDATE usuarios SET nombre=?, apellido=? WHERE id=?",
+            (nombre.strip(), apellido.strip(), usuario_id)
+        )
+        return cur.rowcount > 0
+
+
+def obtener_detecciones_con_id(limite: int = 200) -> list[dict]:
+    """
+    Como obtener_detecciones_recientes pero incluye el id de cada registro
+    de asistencia y el id del usuario, necesario para la edición.
+    """
+    with _conexion() as conn:
+        filas = conn.execute(
+            """SELECT
+                a.id          AS asistencia_id,
+                u.id          AS usuario_id,
+                u.nombre,
+                u.apellido,
+                DATE(a.detectado_en) AS fecha,
+                TIME(a.detectado_en) AS hora,
+                CASE WHEN a.presente=1 THEN 'Presente' ELSE 'Ausente' END AS estado
+               FROM asistencia a
+               JOIN usuarios u ON u.id = a.usuario_id
+               ORDER BY a.detectado_en DESC
+               LIMIT ?""",
+            (limite,)
+        ).fetchall()
+        return [dict(f) for f in filas]
+
+
 def obtener_id_usuario_por_nombre(nombre_completo: str) -> int | None:
     """
     Busca el ID de usuario dado un nombre completo 'Nombre Apellido'.

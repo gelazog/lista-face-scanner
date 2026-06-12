@@ -34,6 +34,8 @@ COLOR_NO_IDENTIFICADO = (68, 68, 255)    # BGR: rojo-azul
 INTERVALO_FRAME_MS  = 30    # ~33 fps
 INTERVALO_RECARGA_S = 0.05  # Pausa entre frames en el hilo
 
+TIMEOUT_CAMARA_S    = 60    # Segundos sin frames antes de cambiar de cámara
+
 
 class VistaEnVivo(ttk.Frame):
     """
@@ -52,6 +54,13 @@ class VistaEnVivo(ttk.Frame):
 
         # Lista de (indice, nombre) de cámaras disponibles
         self._camaras_disponibles: list = []
+
+        # Auto-inicio: si el usuario interactúa antes de que dispare, se cancela
+        self._auto_inicio_cancelado: bool = False
+
+        # Contador de frames recibidos desde que se inició la cámara actual
+        # Usamos un entero mutable en lista para poder modificarlo desde hilos
+        self._frames_recibidos: list = [0]
 
         self.configure(style="Panel.TFrame")
         self._construir_ui()
@@ -88,6 +97,8 @@ class VistaEnVivo(ttk.Frame):
         )
         self._combo_camara.pack(side="left", padx=(4, 4))
         self._combo_camara.set("Detectando cámaras...")
+        # Bind: cualquier interacción con el combo cancela el auto-inicio
+        self._combo_camara.bind("<<ComboboxSelected>>", self._on_interaccion_usuario)
 
         # Botón de actualizar lista de cámaras
         self._btn_refresh = tk.Button(
@@ -116,6 +127,14 @@ class VistaEnVivo(ttk.Frame):
             bg=PANEL_SECUNDARIO, fg=TEXTO_CLARO, font=("Segoe UI", 10)
         )
         self._lbl_contador.pack(side="right", padx=16)
+
+        # ── Label de estado de auto-inicio ────────────────────────────────────
+        self._lbl_estado = tk.Label(
+            self, text="Detectando cámaras...",
+            bg=FONDO_PANEL, fg=TEXTO_OPACO,
+            font=("Segoe UI", 9, "italic")
+        )
+        self._lbl_estado.grid(row=2, column=0, sticky="w", padx=16, pady=(0, 4))
 
         # ── Canvas de video ───────────────────────────────────────────────────
         contenedor = tk.Frame(self, bg=FONDO_PANEL)
@@ -156,6 +175,12 @@ class VistaEnVivo(ttk.Frame):
             fill=TEXTO_OPACO, font=("Segoe UI", 14), justify="center"
         )
 
+    # ── Interacción de usuario (cancela auto-inicio) ───────────────────────────
+
+    def _on_interaccion_usuario(self, event=None):
+        """Marca que el usuario interactuó manualmente; cancela el auto-inicio."""
+        self._auto_inicio_cancelado = True
+
     # ── Gestión del combo de cámaras ──────────────────────────────────────────
 
     def _detectar_y_llenar_combo(self):
@@ -180,6 +205,10 @@ class VistaEnVivo(ttk.Frame):
             self._combo_camara.set("No se detectaron camaras")
             self._combo_camara.configure(state="disabled")
             self._btn_toggle.configure(state="disabled")
+            self._lbl_estado.configure(
+                text="No se detectaron cámaras. Conecte una y pulse 'Actualizar camaras'.",
+                fg=ROJO_ERROR
+            )
             logger.warning("No se encontraron cámaras disponibles.")
             return
 
@@ -189,13 +218,22 @@ class VistaEnVivo(ttk.Frame):
         self._combo_camara.configure(state="readonly")
         self._btn_toggle.configure(state="normal")
 
+        # Disparar auto-inicio si el usuario no ha interactuado aún
+        if not self._auto_inicio_cancelado:
+            self._auto_iniciar_camara(indice_lista=0)
+
     def _refrescar_camaras(self):
         """Re-escanea las cámaras disponibles cuando la cámara no está activa."""
         if self._activa:
             return
+        # Refrescar también cancela el auto-inicio previo y reinicia el estado
+        self._auto_inicio_cancelado = True
         self._combo_camara.configure(state="disabled")
         self._btn_toggle.configure(state="disabled")
         self._combo_camara.set("Detectando camaras...")
+        self._lbl_estado.configure(text="Detectando cámaras...", fg=TEXTO_OPACO)
+        # Permite un nuevo auto-inicio al volver a detectar
+        self._auto_inicio_cancelado = False
         threading.Thread(target=self._detectar_y_llenar_combo, daemon=True).start()
 
     def _indice_camara_seleccionado(self) -> int:
@@ -205,9 +243,141 @@ class VistaEnVivo(ttk.Frame):
             return 0
         return self._camaras_disponibles[sel][0]
 
+    # ── Auto-inicio ───────────────────────────────────────────────────────────
+
+    def _auto_iniciar_camara(self, indice_lista: int):
+        """
+        Inicia automáticamente la cámara en la posición `indice_lista` de
+        `_camaras_disponibles`. Si no llegan frames en TIMEOUT_CAMARA_S segundos,
+        prueba la siguiente. Llamar solo desde el hilo principal.
+        """
+        if self._auto_inicio_cancelado or self._activa:
+            return
+
+        if indice_lista >= len(self._camaras_disponibles):
+            self._lbl_estado.configure(
+                text="No se pudo iniciar ninguna cámara automáticamente. "
+                     "Seleccione una manualmente.",
+                fg=ROJO_ERROR
+            )
+            logger.warning("Auto-inicio fallido: ninguna cámara entregó frames.")
+            return
+
+        _, nombre = self._camaras_disponibles[indice_lista]
+        self._lbl_estado.configure(
+            text=f"Iniciando {nombre}...",
+            fg=ACENTO
+        )
+
+        # Seleccionar esa cámara en el combo
+        self._combo_camara.set(nombre)
+        self._combo_camara.current(indice_lista)
+
+        # Intentar abrir la cámara
+        indice_fisico = self._camaras_disponibles[indice_lista][0]
+        self._camara.indice = indice_fisico
+
+        if not self._camara.iniciar():
+            logger.warning(f"Auto-inicio: no se pudo abrir {nombre}, probando siguiente.")
+            self._auto_iniciar_camara(indice_lista + 1)
+            return
+
+        # Cámara abierta: activar captura
+        self._activa = True
+        self._frames_recibidos[0] = 0
+        self._combo_camara.configure(state="disabled")
+        self._btn_refresh.configure(state="disabled")
+        self._btn_toggle.configure(text="Detener Camara", bg=ROJO_ERROR, fg="white")
+
+        self._hilo = threading.Thread(target=self._bucle_captura, daemon=True)
+        self._hilo.start()
+        self._actualizar_canvas()
+
+        # Lanzar monitor de timeout en hilo daemon
+        threading.Thread(
+            target=self._monitorear_timeout,
+            args=(indice_lista,),
+            daemon=True
+        ).start()
+
+    def _monitorear_timeout(self, indice_lista: int):
+        """
+        Hilo daemon: espera TIMEOUT_CAMARA_S segundos comprobando si llegan frames.
+        Actualiza el countdown en el label de estado vía self.after().
+        Si no llegan frames, detiene la cámara y prueba la siguiente.
+        """
+        inicio = time.monotonic()
+
+        while True:
+            elapsed = time.monotonic() - inicio
+            restante = int(TIMEOUT_CAMARA_S - elapsed)
+
+            if not self._activa:
+                # El usuario detuvo la cámara manualmente; salir sin hacer nada
+                return
+
+            if self._auto_inicio_cancelado:
+                return
+
+            if self._frames_recibidos[0] > 0:
+                # Frames llegando: ocultar label de estado
+                self.after(0, lambda: self._lbl_estado.configure(text="", fg=TEXTO_OPACO))
+                return
+
+            if restante <= 0:
+                break
+
+            # Construir texto del countdown
+            _, nombre = self._camaras_disponibles[indice_lista]
+            # Próxima cámara (si existe)
+            prox_idx = indice_lista + 1
+            if prox_idx < len(self._camaras_disponibles):
+                _, nombre_prox = self._camaras_disponibles[prox_idx]
+                msg = f"Cambiando a {nombre_prox} en {restante}s..."
+            else:
+                msg = f"Sin respuesta de {nombre}. Cambiando en {restante}s..."
+
+            self.after(0, lambda m=msg: self._lbl_estado.configure(text=m, fg=TEXTO_OPACO))
+            time.sleep(1)
+
+        # Timeout agotado y no llegaron frames
+        if self._auto_inicio_cancelado or not self._activa:
+            return
+
+        logger.info(f"Auto-inicio timeout en cámara {indice_lista}, probando siguiente.")
+
+        # Detener la cámara actual desde el hilo principal
+        self.after(0, lambda: self._auto_detener_y_continuar(indice_lista))
+
+    def _auto_detener_y_continuar(self, indice_lista: int):
+        """
+        Llamado desde el hilo principal cuando el timeout se agota.
+        Detiene la cámara actual y lanza auto-inicio con la siguiente.
+        """
+        if self._auto_inicio_cancelado or not self._activa:
+            return
+
+        # Detener silenciosamente sin restaurar botones todavía
+        self._activa = False
+        self._camara.detener()
+
+        # Restaurar controles
+        if self._camaras_disponibles:
+            self._combo_camara.configure(state="readonly")
+        self._btn_refresh.configure(state="normal")
+        self._btn_toggle.configure(text="Iniciar Camara", bg=ACENTO, fg="#0A0A1A")
+        self._lbl_contador.configure(text="Personas detectadas: 0")
+        self._lista_detectados.delete(0, "end")
+        self._mostrar_placeholder()
+
+        # Intentar la siguiente cámara
+        self._auto_iniciar_camara(indice_lista + 1)
+
     # ── Control de cámara ─────────────────────────────────────────────────────
 
     def _toggle_camara(self):
+        # Interacción manual: cancelar auto-inicio
+        self._on_interaccion_usuario()
         if self._activa:
             self._detener_camara()
         else:
@@ -235,6 +405,9 @@ class VistaEnVivo(ttk.Frame):
             return
 
         self._activa = True
+        self._frames_recibidos[0] = 0
+        self._lbl_estado.configure(text="", fg=TEXTO_OPACO)
+
         # Deshabilitar controles de selección mientras la cámara está activa
         self._combo_camara.configure(state="disabled")
         self._btn_refresh.configure(state="disabled")
@@ -247,6 +420,8 @@ class VistaEnVivo(ttk.Frame):
     def _detener_camara(self):
         self._activa = False
         self._camara.detener()
+
+        self._lbl_estado.configure(text="", fg=TEXTO_OPACO)
 
         # Re-habilitar controles de selección
         if self._camaras_disponibles:
@@ -269,6 +444,9 @@ class VistaEnVivo(ttk.Frame):
             if frame is None:
                 time.sleep(0.1)
                 continue
+
+            # Registrar que llegó un frame (para el monitor de timeout)
+            self._frames_recibidos[0] += 1
 
             resultado = self.motor.procesar_frame(frame)
             frame_dibujado = self._dibujar_bboxes(frame, resultado)
@@ -367,4 +545,5 @@ class VistaEnVivo(ttk.Frame):
     def destruir(self):
         """Detener cámara y limpiar recursos antes de destruir el widget."""
         self._activa = False
+        self._auto_inicio_cancelado = True
         self._camara.detener()
