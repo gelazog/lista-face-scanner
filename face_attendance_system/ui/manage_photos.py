@@ -315,8 +315,8 @@ class GestionarFotos(ttk.Frame):
         self._entry_apellido.grid(row=0, column=3, sticky="ew", ipady=4)
 
         # Fila con el botón de guardar
-        fila_btn = tk.Frame(self._marco_edicion, bg=FONDO_PANEL, padx=12, pady=(0, 10))
-        fila_btn.grid(row=2, column=0, sticky="w")
+        fila_btn = tk.Frame(self._marco_edicion, bg=FONDO_PANEL)
+        fila_btn.grid(row=2, column=0, sticky="w", padx=12, pady=(0, 10))
 
         self._btn_guardar = tk.Button(
             fila_btn,
