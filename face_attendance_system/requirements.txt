@@ -1,0 +1,23 @@
+# Sistema de Asistencia por Reconocimiento Facial
+# Python 3.10+ (probado en 3.14)
+# No requiere dlib, cmake ni Visual Studio
+
+# Visión computacional
+opencv-python>=4.8.0
+
+# Reconocimiento facial (InsightFace + ONNX, sin dlib)
+insightface>=1.0.0
+onnxruntime>=1.16.0
+
+# Interfaz gráfica (viene con Python)
+# tkinter — incluido en Python estándar
+
+# Procesamiento de imágenes
+Pillow>=10.0.0
+
+# Exportación a Excel
+openpyxl>=3.1.2
+pandas>=2.0.0
+
+# Dependencias de InsightFace (se instalan automáticamente)
+# numpy, scikit-image, requests, tqdm
